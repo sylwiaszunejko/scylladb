@@ -402,6 +402,12 @@ public:
     }
 
     virtual inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override {
+        auto result = to_replica_set(get_replicas_for_reading(search_token));
+        maybe_remove_node_being_replaced(*_tmptr, *_rs, result);
+        return result;
+    }
+
+    tablet_replica_set get_replicas_for_reading(const token& search_token) const override {
         auto&& tablets = get_tablet_map();
         auto tablet = tablets.get_tablet_id(search_token);
         auto&& info = tablets.get_tablet_transition_info(tablet);
@@ -419,9 +425,7 @@ public:
             on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->reads)));
         });
         tablet_logger.trace("get_endpoints_for_reading({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
-        auto result = to_replica_set(replicas);
-        maybe_remove_node_being_replaced(*_tmptr, *_rs, result);
-        return result;
+        return replicas;
     }
 
     virtual bool has_pending_ranges(inet_address endpoint) const override {
