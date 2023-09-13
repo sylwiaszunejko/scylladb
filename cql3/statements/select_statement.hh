@@ -19,6 +19,7 @@
 #include "index/secondary_index_manager.hh"
 #include "exceptions/exceptions.hh"
 #include "exceptions/coordinator_result.hh"
+#include "locator/tablets.hh"
 
 namespace locator {
     class node;
@@ -91,7 +92,8 @@ protected:
     std::unique_ptr<cql3::attributes> _attrs;
 private:
     future<shared_ptr<cql_transport::messages::result_message>> process_results_complex(foreign_ptr<lw_shared_ptr<query::result>> results,
-        lw_shared_ptr<query::read_command> cmd, const query_options& options, gc_clock::time_point now) const;
+        lw_shared_ptr<query::read_command> cmd, const query_options& options, gc_clock::time_point now, locator::tablet_replica_set tablet_replicas = {}, 
+        dht::token_range token_range = dht::token_range()) const;
 protected :
     virtual future<::shared_ptr<cql_transport::messages::result_message>> do_execute(query_processor& qp,
         service::query_state& state, const query_options& options) const;
@@ -127,11 +129,13 @@ public:
 
     future<::shared_ptr<cql_transport::messages::result_message>> execute_without_checking_exception_message_non_aggregate_unpaged(query_processor& qp,
         lw_shared_ptr<query::read_command> cmd, dht::partition_range_vector&& partition_ranges, service::query_state& state,
-         const query_options& options, gc_clock::time_point now) const;
+        const query_options& options, gc_clock::time_point now, locator::tablet_replica_set tablet_replicas = {},
+        dht::token_range token_range = dht::token_range()) const;
 
     future<::shared_ptr<cql_transport::messages::result_message>> execute_without_checking_exception_message_aggregate_or_paged(query_processor& qp,
         lw_shared_ptr<query::read_command> cmd, dht::partition_range_vector&& partition_ranges, service::query_state& state,
-         const query_options& options, gc_clock::time_point now, int32_t page_size, bool aggregate, bool nonpaged_filtering) const;
+         const query_options& options, gc_clock::time_point now, int32_t page_size, bool aggregate, bool nonpaged_filtering,
+         locator::tablet_replica_set tablet_replicas = {}, dht::token_range token_range = dht::token_range()) const;
 
 
     struct primary_key {
@@ -140,7 +144,8 @@ public:
     };
 
     future<shared_ptr<cql_transport::messages::result_message>> process_results(foreign_ptr<lw_shared_ptr<query::result>> results,
-        lw_shared_ptr<query::read_command> cmd, const query_options& options, gc_clock::time_point now) const;
+        lw_shared_ptr<query::read_command> cmd, const query_options& options, gc_clock::time_point now,
+        locator::tablet_replica_set tablet_replicas = {}, dht::token_range token_range = dht::token_range()) const;
 
     const sstring& keyspace() const;
 

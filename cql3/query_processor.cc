@@ -1124,9 +1124,12 @@ future<> query_processor::query_internal(
     return query_internal(query_string, db::consistency_level::ONE, {}, 1000, std::move(f));
 }
 
-shared_ptr<cql_transport::messages::result_message> query_processor::bounce_to_shard(unsigned shard, cql3::computed_function_values cached_fn_calls) {
+shared_ptr<cql_transport::messages::result_message> query_processor::bounce_to_shard(unsigned shard, cql3::computed_function_values cached_fn_calls,
+        locator::tablet_replica_set tablet_replicas, dht::token_range token_range) {
     _proxy.get_stats().replica_cross_shard_ops++;
-    return ::make_shared<cql_transport::messages::result_message::bounce_to_shard>(shard, std::move(cached_fn_calls));
+    auto result = ::make_shared<cql_transport::messages::result_message::bounce_to_shard>(shard, std::move(cached_fn_calls));
+    result->add_tablet_info(tablet_replicas, token_range);
+    return result;
 }
 
 void query_processor::update_authorized_prepared_cache_config() {

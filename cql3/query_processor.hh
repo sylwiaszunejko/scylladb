@@ -29,6 +29,7 @@
 #include "service/broadcast_tables/experimental/query_result.hh"
 #include "utils/observable.hh"
 #include "lang/wasm.hh"
+#include "locator/tablets.hh"
 #include "service/raft/raft_group0_client.hh"
 
 
@@ -435,7 +436,8 @@ public:
 
     friend class migration_subscriber;
 
-    shared_ptr<cql_transport::messages::result_message> bounce_to_shard(unsigned shard, cql3::computed_function_values cached_fn_calls);
+    shared_ptr<cql_transport::messages::result_message> bounce_to_shard(unsigned shard, cql3::computed_function_values cached_fn_calls,
+            locator::tablet_replica_set tablet_replicas = {}, dht::token_range token_range = dht::token_range());
 
     void update_authorized_prepared_cache_config();
 

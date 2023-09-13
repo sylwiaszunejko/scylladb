@@ -43,6 +43,7 @@
 #include "test/lib/select_statement_utils.hh"
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "gms/feature_service.hh"
+#include "utils/fb_utilities.hh"
 #include "utils/result.hh"
 #include "utils/result_combinators.hh"
 #include "utils/result_loop.hh"
@@ -404,24 +405,49 @@ select_statement::do_execute(query_processor& qp,
 
     auto key_ranges = _restrictions->get_partition_key_ranges(options);
 
+    bool send_tablet = false;
+
+    auto token = dht::token();
+    unsigned shard;
+
+    if (key_ranges.size() > 0 && query::is_single_partition(key_ranges.front())) {
+        token = key_ranges[0].start()->value().as_decorated_key().token();
+        shard = _schema->table().shard_of(token);
+    }
+
+    auto&& table = qp.proxy().local_db().find_column_family(_schema);
+    auto erm = table.get_effective_replication_map();
+    auto tablet_replicas = erm->get_replicas_for_reading(token);
+    auto token_range = erm->get_token_range(token);
+
+    if ((!tablet_replicas.empty() && erm->get_token_metadata_ptr()->get_endpoint_for_host_id(tablet_replicas.front().host) != utils::fb_utilities::get_broadcast_address())
+        || this_shard_id() != shard) {
+        send_tablet = true;
+    }
+
     if (db::is_serial_consistency(options.get_consistency())) {
         if (key_ranges.size() != 1 || !query::is_single_partition(key_ranges.front())) {
              throw exceptions::invalid_request_exception(
                      "SERIAL/LOCAL_SERIAL consistency may only be requested for one partition at a time");
         }
-        unsigned shard = _schema->table().shard_of(key_ranges[0].start()->value().as_decorated_key().token());
         if (this_shard_id() != shard) {
             return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(
-                    qp.bounce_to_shard(shard, std::move(const_cast<cql3::query_options&>(options).take_cached_pk_function_calls()))
-                );
+                qp.bounce_to_shard(shard, std::move(const_cast<cql3::query_options&>(options).take_cached_pk_function_calls()), tablet_replicas, token_range)
+            );
         }
     }
 
     if (!aggregate && !_restrictions_need_filtering && (page_size <= 0
             || !service::pager::query_pagers::may_need_paging(*_schema, page_size,
                     *command, key_ranges))) {
+        if (send_tablet) {
+            return execute_without_checking_exception_message_non_aggregate_unpaged(qp, command, std::move(key_ranges), state, options, now, tablet_replicas, token_range);
+        }
         return execute_without_checking_exception_message_non_aggregate_unpaged(qp, command, std::move(key_ranges), state, options, now);
     } else {
+        if (send_tablet) {
+            return execute_without_checking_exception_message_aggregate_or_paged(qp, command, std::move(key_ranges), state, options, now, page_size, aggregate, nonpaged_filtering, tablet_replicas, token_range);
+        }
         return execute_without_checking_exception_message_aggregate_or_paged(qp, command, std::move(key_ranges), state, options, now, page_size, aggregate, nonpaged_filtering);
     }
 }
@@ -429,7 +455,8 @@ select_statement::do_execute(query_processor& qp,
 future<::shared_ptr<cql_transport::messages::result_message>>
 select_statement::execute_without_checking_exception_message_aggregate_or_paged(query_processor& qp,
         lw_shared_ptr<query::read_command> command, dht::partition_range_vector&& key_ranges, service::query_state& state,
-        const query_options& options, gc_clock::time_point now, int32_t page_size, bool aggregate, bool nonpaged_filtering) const {
+        const query_options& options, gc_clock::time_point now, int32_t page_size, bool aggregate, bool nonpaged_filtering,
+        locator::tablet_replica_set tablet_replicas, dht::token_range token_range) const {
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto timeout_duration = get_timeout(state.get_client_state(), options);
     auto timeout = db::timeout_clock::now() + timeout_duration;
@@ -446,7 +473,7 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
         if (result_void.has_error()) {
             co_return failed_result_to_result_message(std::move(result_void));
         }
-        co_return co_await builder.with_thread_if_needed([this, &p, &builder] {
+        co_return co_await builder.with_thread_if_needed([this, &p, &builder, &tablet_replicas, &token_range] {
             auto rs = builder.build();
             if (_restrictions_need_filtering) {
                 _stats.filtered_rows_read_total += p->stats().rows_read_total;
@@ -454,6 +481,7 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
             }
             update_stats_rows_read(rs->size());
             auto msg = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
+            msg->add_tablet_info(tablet_replicas, token_range);
             return shared_ptr<cql_transport::messages::result_message>(std::move(msg));
         });
     }
@@ -480,9 +508,10 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
             }
         }();
 
-        co_return shared_ptr<cql_transport::messages::result_message>(
-            ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(generator), std::move(meta)))
-        );
+        auto msg = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(generator), std::move(meta)));
+        msg->add_tablet_info(tablet_replicas, token_range);
+
+        co_return shared_ptr<cql_transport::messages::result_message>(msg);
     }
 
     coordinator_result<std::unique_ptr<cql3::result_set>> result_rs = co_await p->fetch_page_result(page_size, now, timeout);
@@ -781,7 +810,9 @@ select_statement::execute_without_checking_exception_message_non_aggregate_unpag
                           dht::partition_range_vector&& partition_ranges,
                           service::query_state& state,
                           const query_options& options,
-                          gc_clock::time_point now) const
+                          gc_clock::time_point now,
+                          locator::tablet_replica_set tablet_replicas,
+                          dht::token_range token_range) const
 {
     // If this is a query with IN on partition key, ORDER BY clause and LIMIT
     // is specified we need to get "limit" rows from each partition since there
@@ -803,13 +834,13 @@ select_statement::execute_without_checking_exception_message_non_aggregate_unpag
                     return make_ready_future<coordinator_result<foreign_ptr<lw_shared_ptr<query::result>>>>(std::move(qr.query_result));
                 }));
             }, std::move(merger));
-        }).then(wrap_result_to_error_message([this, &options, now, cmd] (auto result) {
-            return this->process_results(std::move(result), cmd, options, now);
+        }).then(wrap_result_to_error_message([this, &options, now, cmd, tablet_replicas, token_range] (auto result) {
+            return this->process_results(std::move(result), cmd, options, now, tablet_replicas, token_range);
         }));
     } else {
         return qp.proxy().query_result(_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
-            .then(wrap_result_to_error_message([this, &options, now, cmd] (service::storage_proxy::coordinator_query_result qr) {
-                return this->process_results(std::move(qr.query_result), cmd, options, now);
+            .then(wrap_result_to_error_message([this, &options, now, cmd, tablet_replicas, token_range] (service::storage_proxy::coordinator_query_result qr) {
+                return this->process_results(std::move(qr.query_result), cmd, options, now, tablet_replicas, token_range);
             }));
     }
 }
@@ -834,23 +865,28 @@ future<shared_ptr<cql_transport::messages::result_message>>
 select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> results,
                                   lw_shared_ptr<query::read_command> cmd,
                                   const query_options& options,
-                                  gc_clock::time_point now) const
+                                  gc_clock::time_point now,
+                                  locator::tablet_replica_set tablet_replicas,
+                                  dht::token_range token_range) const
 {
     const bool fast_path = !needs_post_query_ordering() && _selection->is_trivial() && !_restrictions_need_filtering;
     if (fast_path) {
-        return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(make_shared<cql_transport::messages::result_message::rows>(result(
+        auto result_mess = make_shared<cql_transport::messages::result_message::rows>(result(
             result_generator(_schema, std::move(results), std::move(cmd), _selection, _stats),
-            _selection->get_result_metadata())
-        ));
+            _selection->get_result_metadata()));
+        result_mess->add_tablet_info(tablet_replicas, token_range);
+        return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(result_mess);
     }
-    return process_results_complex(std::move(results), std::move(cmd), options, now);
+    return process_results_complex(std::move(results), std::move(cmd), options, now, tablet_replicas, token_range);
 }
 
 future<shared_ptr<cql_transport::messages::result_message>>
 select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::result>> results,
                                   lw_shared_ptr<query::read_command> cmd,
                                   const query_options& options,
-                                  gc_clock::time_point now) const {
+                                  gc_clock::time_point now,
+                                  locator::tablet_replica_set tablet_replicas,
+                                  dht::token_range token_range) const {
     cql3::selection::result_set_builder builder(*_selection, now);
     co_return co_await builder.with_thread_if_needed([&] {
         if (_restrictions_need_filtering) {
@@ -875,7 +911,10 @@ select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::resul
         }
         update_stats_rows_read(rs->size());
         _stats.filtered_rows_matched_total += _restrictions_need_filtering ? rs->size() : 0;
-        return shared_ptr<cql_transport::messages::result_message>(::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs))));
+
+        auto result_mess = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
+        result_mess->add_tablet_info(tablet_replicas, token_range);
+        return shared_ptr<cql_transport::messages::result_message>(result_mess);
     });
 }
 
