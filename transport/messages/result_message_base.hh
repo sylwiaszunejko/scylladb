@@ -14,6 +14,7 @@
 #include <seastar/core/sstring.hh>
 
 #include "seastarx.hh"
+#include "locator/tablets.hh"
 
 namespace cql_transport {
 namespace messages {
@@ -39,6 +40,24 @@ public:
 
     void add_custom_payload(sstring key, bytes value) {
         _custom_payload[key] = value;
+    }
+
+    void add_tablet_info(locator::tablet_replica_set tablet_replicas, dht::token_range token_range) {
+        if (!tablet_replicas.empty()) {
+            auto replicas_bytes = bytes();
+            replicas_bytes.append(reinterpret_cast<const int8_t*>(std::to_string(tablet_replicas.size()).data()), sizeof(tablet_replicas.size()));
+            for (auto replica : tablet_replicas) {
+                replicas_bytes.append(reinterpret_cast<const int8_t*>(replica.host.to_sstring().data()), replica.host.to_sstring().size());
+                replicas_bytes.append(reinterpret_cast<const int8_t*>(std::to_string(replica.shard).data()), sizeof(replica.shard));
+            }
+            this->add_custom_payload("tablet_replicas", replicas_bytes);
+            auto token_bytes = bytes();
+            auto first_token = token_range.start()->value();
+            auto last_token = token_range.end()->value();
+            token_bytes.append(first_token.data().data(), first_token.data().size());
+            token_bytes.append(last_token.data().data(), last_token.data().size());
+            this->add_custom_payload("token_range", token_bytes);
+        }
     }
 
     const std::map<sstring, bytes>& custom_payload() const {
