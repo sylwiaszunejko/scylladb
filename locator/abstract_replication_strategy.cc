@@ -124,6 +124,10 @@ tablet_replica_set vnode_effective_replication_map::get_replicas_for_reading(con
     return {};
 }
 
+dht::token_range vnode_effective_replication_map::get_token_range(const token& token) const {
+    return dht::token_range();
+}
+
 bool vnode_effective_replication_map::has_pending_ranges(inet_address endpoint) const {
     for (const auto& item : _pending_endpoints) {
         const auto& nodes = item.second;

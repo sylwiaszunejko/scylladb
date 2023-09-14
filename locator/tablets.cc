@@ -428,6 +428,12 @@ public:
         return replicas;
     }
 
+    dht::token_range get_token_range(const token& search_token) const override {
+        auto&& tablets = get_tablet_map();
+        auto tablet = tablets.get_tablet_id(search_token);
+        return tablets.get_token_range(tablet);
+    }
+
     virtual bool has_pending_ranges(inet_address endpoint) const override {
         const auto host_id = _tmptr->get_host_id_if_known(endpoint);
         if (!host_id.has_value()) {

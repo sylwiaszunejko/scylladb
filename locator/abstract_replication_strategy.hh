@@ -206,6 +206,8 @@ public:
 
     virtual tablet_replica_set get_replicas_for_reading(const token& search_token) const = 0;
 
+    virtual dht::token_range get_token_range(const token& search_token) const = 0;
+
     /// Returns true if there are any pending ranges for this endpoint.
     /// This operation is expensive, for vnode_erm it iterates
     /// over all pending ranges which is O(number of tokens).
@@ -282,6 +284,7 @@ public: // effective_replication_map
     inet_address_vector_topology_change get_pending_endpoints(const token& search_token) const override;
     inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override;
     tablet_replica_set get_replicas_for_reading(const token& search_token) const override;
+    dht::token_range get_token_range(const token& search_token) const override;
     bool has_pending_ranges(inet_address endpoint) const override;
     std::unique_ptr<token_range_splitter> make_splitter() const override;
     const dht::sharder& get_sharder(const schema& s) const override;
