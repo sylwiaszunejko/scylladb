@@ -10,6 +10,7 @@
 #pragma once
 #include "service/paxos/cas_request.hh"
 #include "cql3/statements/modification_statement.hh"
+#include "locator/tablets.hh"
 
 namespace cql3::statements {
 
@@ -76,7 +77,8 @@ public:
     /// in case of batch statement.
     seastar::shared_ptr<cql_transport::messages::result_message>
     build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
-            const column_set& mask, bool is_applied) const;
+            const column_set& mask, bool is_applied, locator::tablet_replica_set _tablet_replicas = {},
+            dht::token_range token_range = dht::token_range()) const;
 
 private:
     bool applies_to() const;

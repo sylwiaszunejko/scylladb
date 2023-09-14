@@ -157,7 +157,9 @@ cas_request::old_row cas_request::find_old_row(const cas_row_update& op) const {
 seastar::shared_ptr<cql_transport::messages::result_message>
 cas_request::build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
                                   const column_set& columns,
-                                  bool is_applied) const {
+                                  bool is_applied, 
+                                  locator::tablet_replica_set tablet_replicas,
+                                  dht::token_range token_range) const {
     const partition_key& pkey = _key.front().start()->value().key().value();
     const clustering_key empty_ckey = clustering_key::make_empty();
     auto result_set = std::make_unique<cql3::result_set>(metadata);
@@ -212,7 +214,9 @@ cas_request::build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
         result_set->add_row(std::move(rs_row));
     }
     cql3::result result(std::move(result_set));
-    return seastar::make_shared<cql_transport::messages::result_message::rows>(std::move(result));
+    auto result_mess = seastar::make_shared<cql_transport::messages::result_message::rows>(std::move(result));
+    result_mess->add_tablet_info(tablet_replicas, token_range);
+    return result_mess;
 }
 
 } // end of namespace "cql3::statements"

@@ -28,6 +28,7 @@
 #include "transport/messages/result_message.hh"
 #include "data_dictionary/data_dictionary.hh"
 #include <seastar/core/execution_stage.hh>
+#include "utils/fb_utilities.hh"
 #include "utils/UUID_gen.hh"
 #include "partition_slice_builder.hh"
 #include "cas_request.hh"
@@ -275,13 +276,36 @@ modification_statement::do_execute(query_processor& qp, service::query_state& qs
         return execute_with_condition(qp, qs, options);
     }
 
-    return execute_without_condition(qp, qs, options).then([] (coordinator_result<> res) {
+    return execute_without_condition(qp, qs, options).then([this, &options, &qp] (coordinator_result<> res) {
         if (!res) {
             return make_ready_future<::shared_ptr<cql_transport::messages::result_message>>(
                     seastar::make_shared<cql_transport::messages::result_message::exception>(std::move(res).assume_error()));
         }
-        return make_ready_future<::shared_ptr<cql_transport::messages::result_message>>(
+
+        json_cache_opt json_cache = maybe_prepare_json_cache(options);
+        std::vector<dht::partition_range> keys = build_partition_keys(options, json_cache);
+    
+        if (keys.size() != 1) {
+            return make_ready_future<::shared_ptr<cql_transport::messages::result_message>>(
                 ::shared_ptr<cql_transport::messages::result_message>{});
+        }
+
+        auto result = seastar::make_shared<cql_transport::messages::result_message::void_message>();
+
+        auto token = keys[0].start()->value().token();
+        auto shard = service::storage_proxy::cas_shard(*s, token);
+
+        auto&& table = qp.proxy().local_db().find_column_family(s);
+        auto erm = table.get_effective_replication_map();
+        auto tablet_replicas = erm->get_replicas_for_reading(token);
+        auto token_range = erm->get_token_range(token);
+
+        if ((!tablet_replicas.empty() && erm->get_token_metadata_ptr()->get_endpoint_for_host_id(tablet_replicas.front().host) != utils::fb_utilities::get_broadcast_address())
+                || this_shard_id() != shard) {
+            result->add_tablet_info(tablet_replicas, token_range);
+        }
+
+        return make_ready_future<::shared_ptr<cql_transport::messages::result_message>>(result);
     });
 }
 
@@ -328,16 +352,36 @@ modification_statement::execute_with_condition(query_processor& qp, service::que
     // modification in the list of CAS commands, since we're handling single-statement execution.
     request->add_row_update(*this, std::move(ranges), std::move(json_cache), options);
 
-    auto shard = service::storage_proxy::cas_shard(*s, request->key()[0].start()->value().as_decorated_key().token());
+    auto token = request->key()[0].start()->value().as_decorated_key().token();
+    auto shard = service::storage_proxy::cas_shard(*s, token);
+
+    auto&& table = qp.proxy().local_db().find_column_family(s);
+    auto erm = table.get_effective_replication_map();
+    auto tablet_replicas = erm->get_replicas_for_reading(token);
+    auto token_range = erm->get_token_range(token);
+    bool send_tablet = false;
+
     if (shard != this_shard_id()) {
+        // shard się nie zgadza - wysyłamy tablet
         return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(
-                qp.bounce_to_shard(shard, std::move(const_cast<cql3::query_options&>(options).take_cached_pk_function_calls()))
+                qp.bounce_to_shard(shard, std::move(const_cast<cql3::query_options&>(options).take_cached_pk_function_calls()), tablet_replicas, token_range)
             );
     }
 
+    // sprawdzamy czy node jest właściwy
+    // jeśli non local przesyłamy tablet
+    if (!tablet_replicas.empty() && erm->get_token_metadata_ptr()->get_endpoint_for_host_id(tablet_replicas.front().host) != utils::fb_utilities::get_broadcast_address()) {
+        //prześlij tablet i token range
+        send_tablet = true;
+    }
+    send_tablet = true;
+
     return qp.proxy().cas(s, request, request->read_command(qp), request->key(),
             {read_timeout, qs.get_permit(), qs.get_client_state(), qs.get_trace_state()},
-            cl_for_paxos, cl_for_learn, statement_timeout, cas_timeout).then([this, request] (bool is_applied) {
+            cl_for_paxos, cl_for_learn, statement_timeout, cas_timeout).then([this, request, send_tablet, tablet_replicas, token_range] (bool is_applied) {
+        if (send_tablet) {
+            return request->build_cas_result_set(_metadata, _columns_of_cas_result_set, is_applied, tablet_replicas, token_range);
+        }
         return request->build_cas_result_set(_metadata, _columns_of_cas_result_set, is_applied);
     });
 }
