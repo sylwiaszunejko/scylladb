@@ -288,6 +288,7 @@ modification_statement::do_execute(query_processor& qp, service::query_state& qs
     if (keys_size_one) {
         auto&& table = s->table();
         if (_may_use_token_aware_routing && table.uses_tablets() && qs.get_client_state().is_protocol_extension_set(cql_transport::cql_protocol_extension::TABLETS_ROUTING_V1)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
             auto erm = table.get_effective_replication_map();
             auto tablet_info = erm->check_locality(token);
             if (tablet_info.has_value()) {
@@ -355,6 +356,7 @@ modification_statement::execute_with_condition(query_processor& qp, service::que
 
     auto&& table = s->table();
     if (_may_use_token_aware_routing && table.uses_tablets() && qs.get_client_state().is_protocol_extension_set(cql_transport::cql_protocol_extension::TABLETS_ROUTING_V1)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         auto erm = table.get_effective_replication_map();
         tablet_info = erm->check_locality(token);
     }

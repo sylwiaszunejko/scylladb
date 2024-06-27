@@ -1261,10 +1261,13 @@ process_batch_internal(service::client_state& client_state, distributed<cql3::qu
     return qp.local().execute_batch_without_checking_exception_message(batch, query_state, options, std::move(pending_authorization_entries))
             .then([stream, batch, q_state = std::move(q_state), trace_state = query_state.get_trace_state(), version] (auto msg) {
         if (msg->move_to_shard()) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             return process_fn_return_type(dynamic_pointer_cast<messages::result_message::bounce_to_shard>(msg));
         } else if (msg->is_exception()) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             return process_fn_return_type(convert_error_message_to_coordinator_result(msg.get()));
         } else {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             tracing::trace(q_state->query_state.get_trace_state(), "Done processing - preparing a result");
             return process_fn_return_type(make_foreign(make_result(stream, *msg, trace_state, version)));
         }
